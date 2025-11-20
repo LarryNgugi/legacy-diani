@@ -16,10 +16,9 @@ import { loadStripe } from "@stripe/stripe-js";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-if (!import.meta.env.VITE_STRIPE_PUBLIC_KEY) {
-  throw new Error('Missing required Stripe key: VITE_STRIPE_PUBLIC_KEY');
-}
-const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY);
+const stripePromise = import.meta.env.VITE_STRIPE_PUBLIC_KEY 
+  ? loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY)
+  : null;
 
 interface BookingSectionProps {
   hostName: string;
@@ -55,28 +54,64 @@ function PaymentForm({ bookingId, totalAmount, onSuccess }: { bookingId: string;
 
     setIsProcessing(true);
 
-    const { error } = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: window.location.origin + "?payment=success",
-      },
-      redirect: "if_required",
-    });
+    try {
+      const { error, paymentIntent } = await stripe.confirmPayment({
+        elements,
+        confirmParams: {
+          return_url: window.location.origin + "?payment=success",
+        },
+        redirect: "if_required",
+      });
 
-    setIsProcessing(false);
+      if (error) {
+        setIsProcessing(false);
+        toast({
+          title: "Payment Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+        return;
+      }
 
-    if (error) {
+      if (paymentIntent && paymentIntent.status === "succeeded") {
+        // Confirm payment with backend
+        const response = await apiRequest("POST", "/api/bookings/confirm-payment", {
+          bookingId,
+          paymentIntentId: paymentIntent.id,
+        });
+
+        const data = await response.json();
+
+        setIsProcessing(false);
+
+        if (!response.ok) {
+          toast({
+            title: "Payment Confirmation Failed",
+            description: data.message || "Please contact us to verify your booking.",
+            variant: "destructive",
+          });
+          return;
+        }
+
+        toast({
+          title: "Payment Successful!",
+          description: "Your booking is confirmed. Check your email for the receipt. We'll be in touch soon!",
+        });
+        onSuccess();
+      } else {
+        setIsProcessing(false);
+        toast({
+          title: "Payment Processing",
+          description: "Payment is being processed. We'll send you an email confirmation.",
+        });
+      }
+    } catch (err: any) {
+      setIsProcessing(false);
       toast({
-        title: "Payment Failed",
-        description: error.message,
+        title: "Error",
+        description: err.message || "An unexpected error occurred.",
         variant: "destructive",
       });
-    } else {
-      toast({
-        title: "Payment Successful!",
-        description: "Your booking is confirmed. We'll be in touch soon!",
-      });
-      onSuccess();
     }
   };
 
@@ -442,7 +477,12 @@ export default function BookingSection({
                   </div>
                 </div>
 
-                {clientSecret && (
+                {!stripePromise ? (
+                  <div className="text-center p-6 bg-destructive/10 rounded-md">
+                    <p className="text-destructive font-semibold">Payment system is not configured.</p>
+                    <p className="text-sm text-muted-foreground mt-2">Please contact us directly to complete your booking.</p>
+                  </div>
+                ) : clientSecret ? (
                   <Elements stripe={stripePromise} options={{ clientSecret }}>
                     <PaymentForm
                       bookingId={bookingId!}
@@ -450,7 +490,7 @@ export default function BookingSection({
                       onSuccess={handlePaymentSuccess}
                     />
                   </Elements>
-                )}
+                ) : null}
 
                 <Button
                   variant="outline"

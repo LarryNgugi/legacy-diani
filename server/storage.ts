@@ -10,6 +10,7 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
   createBooking(booking: InsertBooking): Promise<Booking>;
   updateBookingPaymentId(bookingId: string, stripePaymentId: string): Promise<void>;
+  updateBookingPaymentStatus(bookingId: string, status: string): Promise<void>;
   getBooking(id: string): Promise<Booking | undefined>;
 }
 
@@ -57,6 +58,14 @@ export class MemStorage implements IStorage {
     const booking = this.bookings.get(bookingId);
     if (booking) {
       booking.stripePaymentId = stripePaymentId;
+      this.bookings.set(bookingId, booking);
+    }
+  }
+
+  async updateBookingPaymentStatus(bookingId: string, status: string): Promise<void> {
+    const booking = this.bookings.get(bookingId);
+    if (booking) {
+      booking.paymentStatus = status;
       this.bookings.set(bookingId, booking);
     }
   }

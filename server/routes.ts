@@ -96,7 +96,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         <body>
           <div class="container">
             <div class="header">
-              <h1>🏝️ New Booking Request</h1>
+              <h1>New Booking Request</h1>
               <p>Legacy Holiday Home Diani</p>
             </div>
             <div class="content">
@@ -165,9 +165,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           subject: `New Booking Request from ${bookingData.name}`,
           html: emailHtml,
         });
-      } catch (emailError) {
-        console.error("Failed to send email:", emailError);
-        // Don't fail the booking if email fails
+        console.log("Booking notification email sent successfully");
+      } catch (emailError: any) {
+        console.error("Failed to send booking notification email:", emailError.message);
+        // Don't fail the booking if email fails, but log the error
       }
 
       res.json({
@@ -179,6 +180,251 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ 
         message: "Error creating booking",
         error: error.message 
+      });
+    }
+  });
+
+  // Confirm payment and generate receipt
+  app.post("/api/bookings/confirm-payment", async (req, res) => {
+    try {
+      const { bookingId, paymentIntentId } = req.body;
+
+      if (!bookingId || !paymentIntentId) {
+        return res.status(400).json({
+          message: "Missing required fields: bookingId and paymentIntentId"
+        });
+      }
+
+      // Verify payment intent with Stripe
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+      if (paymentIntent.status !== "succeeded") {
+        return res.status(400).json({
+          message: "Payment has not been completed",
+          status: paymentIntent.status
+        });
+      }
+
+      // Update booking payment status
+      await storage.updateBookingPaymentStatus(bookingId, "paid");
+
+      // Get booking details for receipt
+      const booking = await storage.getBooking(bookingId);
+
+      if (!booking) {
+        return res.status(404).json({
+          message: "Booking not found"
+        });
+      }
+
+      // Format dates for receipt
+      const checkInDate = new Date(booking.checkIn).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+      const checkOutDate = new Date(booking.checkOut).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+
+      // Send confirmation email with receipt to guest
+      const receiptHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background-color: #C96846; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+            .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
+            .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+            .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+            .detail-label { font-weight: bold; color: #666; }
+            .detail-value { color: #333; }
+            .total { font-size: 24px; color: #C96846; font-weight: bold; text-align: right; margin-top: 15px; }
+            .footer { text-align: center; margin-top: 20px; color: #666; font-size: 14px; }
+            .success-badge { background-color: #10B981; color: white; padding: 10px 20px; border-radius: 5px; display: inline-block; margin: 20px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Booking Confirmation & Receipt</h1>
+              <p>Legacy Holiday Home Diani</p>
+            </div>
+            <div class="content">
+              <div class="success-badge">Payment Confirmed</div>
+              
+              <p>Dear ${booking.name},</p>
+              <p>Thank you for your payment! Your booking at Legacy Holiday Home Diani has been confirmed.</p>
+              
+              <div class="booking-details">
+                <h2 style="color: #C96846; margin-top: 0;">Booking Details</h2>
+                <div class="detail-row">
+                  <span class="detail-label">Booking ID:</span>
+                  <span class="detail-value">${booking.id}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Guest Name:</span>
+                  <span class="detail-value">${booking.name}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Email:</span>
+                  <span class="detail-value">${booking.email}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Phone:</span>
+                  <span class="detail-value">${booking.phone}</span>
+                </div>
+                
+                <h2 style="color: #C96846; margin-top: 30px;">Stay Details</h2>
+                <div class="detail-row">
+                  <span class="detail-label">Check-in:</span>
+                  <span class="detail-value">${checkInDate}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Check-out:</span>
+                  <span class="detail-value">${checkOutDate}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Guests:</span>
+                  <span class="detail-value">${booking.adults} ${booking.adults === 1 ? 'Adult' : 'Adults'}, ${booking.children} ${booking.children === 1 ? 'Child' : 'Children'}</span>
+                </div>
+                
+                ${booking.specialRequirements ? `
+                  <h2 style="color: #C96846; margin-top: 30px;">Special Requirements</h2>
+                  <p style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    ${booking.specialRequirements}
+                  </p>
+                ` : ''}
+                
+                <h2 style="color: #C96846; margin-top: 30px;">Payment Summary</h2>
+                <div class="detail-row">
+                  <span class="detail-label">Payment ID:</span>
+                  <span class="detail-value">${paymentIntentId}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Payment Status:</span>
+                  <span class="detail-value" style="color: #10B981; font-weight: bold;">PAID</span>
+                </div>
+                
+                <div class="total">
+                  Total Paid: $${booking.totalAmount}
+                </div>
+              </div>
+              
+              <p style="margin-top: 30px;">
+                Joseph will be in touch soon to confirm your arrival details and answer any questions you may have.
+              </p>
+              
+              <p>
+                For any immediate questions, please contact:<br>
+                <strong>Phone:</strong> +254 714 389500<br>
+                <strong>Location:</strong> Diani Coast, Kenya
+              </p>
+              
+              <p>We look forward to welcoming you to Legacy Holiday Home Diani!</p>
+            </div>
+            <div class="footer">
+              <p>This is your official booking confirmation and payment receipt.</p>
+              <p>Legacy Holiday Home Diani - Your Luxury Escape Awaits</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `;
+
+      try {
+        await transporter.sendMail({
+          from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
+          to: booking.email,
+          subject: `Booking Confirmed - Legacy Holiday Home Diani`,
+          html: receiptHtml,
+        });
+        console.log("Receipt email sent to guest successfully");
+      } catch (emailError: any) {
+        console.error("Failed to send receipt email to guest:", emailError.message);
+        // Log error but don't fail the confirmation
+      }
+
+      // Send payment confirmation to host
+      const hostNotificationHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background-color: #10B981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+            .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
+            .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+            .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+            .detail-label { font-weight: bold; color: #666; }
+            .detail-value { color: #333; }
+            .total { font-size: 24px; color: #10B981; font-weight: bold; text-align: right; margin-top: 15px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Payment Received</h1>
+              <p>Booking #${booking.id.substring(0, 8)}</p>
+            </div>
+            <div class="content">
+              <p>Hello Joseph,</p>
+              <p>Great news! Payment has been received for the booking from ${booking.name}.</p>
+              
+              <div class="booking-details">
+                <div class="detail-row">
+                  <span class="detail-label">Guest:</span>
+                  <span class="detail-value">${booking.name}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Check-in:</span>
+                  <span class="detail-value">${checkInDate}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Check-out:</span>
+                  <span class="detail-value">${checkOutDate}</span>
+                </div>
+                <div class="total">
+                  Amount Received: $${booking.totalAmount}
+                </div>
+              </div>
+              
+              <p>The guest has been sent a confirmation email with their receipt. Please reach out to confirm their arrival arrangements.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `;
+
+      try {
+        await transporter.sendMail({
+          from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
+          to: "bettirosengugi@gmail.com",
+          subject: `Payment Received - ${booking.name}`,
+          html: hostNotificationHtml,
+        });
+        console.log("Payment confirmation email sent to host successfully");
+      } catch (emailError: any) {
+        console.error("Failed to send payment confirmation to host:", emailError.message);
+      }
+
+      res.json({
+        success: true,
+        message: "Payment confirmed and receipt sent",
+        bookingId: booking.id,
+      });
+    } catch (error: any) {
+      console.error("Payment confirmation error:", error);
+      res.status(500).json({
+        message: "Error confirming payment",
+        error: error.message
       });
     }
   });

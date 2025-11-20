@@ -32,7 +32,7 @@ export default function BookingCTA({ onBookNow }: BookingCTAProps) {
                 variant="outline"
                 className="text-lg px-8 py-6 bg-white/10 backdrop-blur-md border-white/30 text-white hover:bg-white/20"
                 onClick={() => {
-                  document.getElementById('contact')?.scrollIntoView({ behavior: 'smooth' });
+                  document.getElementById('booking')?.scrollIntoView({ behavior: 'smooth' });
                 }}
                 data-testid="button-contact-cta"
               >
