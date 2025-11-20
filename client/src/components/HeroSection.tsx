@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { MapPin, DollarSign } from "lucide-react";
+import { MapPin } from "lucide-react";
 
 interface HeroSectionProps {
   backgroundImage: string;
@@ -32,21 +32,9 @@ export default function HeroSection({
           {villaName}
         </h1>
         
-        <div className="flex items-center justify-center gap-2 text-white/90 text-lg md:text-xl mb-6">
+        <div className="flex items-center justify-center gap-2 text-white/90 text-lg md:text-xl mb-8">
           <MapPin className="w-5 h-5" />
           <p data-testid="text-tagline">{tagline}</p>
-        </div>
-        
-        <div className="flex items-center justify-center gap-2 mb-8">
-          <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-md px-6 py-3">
-            <div className="flex items-center gap-2">
-              <DollarSign className="w-5 h-5 text-white" />
-              <span className="text-3xl font-semibold text-white" data-testid="text-price">
-                ${pricePerNight}
-              </span>
-              <span className="text-white/80 text-lg">/ night</span>
-            </div>
-          </div>
         </div>
         
         <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
