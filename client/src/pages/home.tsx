@@ -23,7 +23,8 @@ import exterior from '@assets/IMG-20250717-WA0109_1763677498352.jpg';
 import bathroom1 from '@assets/IMG-20250717-WA0116_1763677498353.jpg';
 import bathroom2 from '@assets/IMG-20250717-WA0126_1763677606539.jpg';
 
-const AIRBNB_URL = "https://www.airbnb.com"; // TODO: Replace with actual Airbnb listing URL
+const AIRBNB_URL = "https://www.airbnb.com.sg/rooms/1394868989933899960?source_impression_id=p3_1763679146_P3q13Mp82dZ353mp";
+const GOOGLE_MAPS_URL = "https://www.google.com/maps/place/Legacy+Holiday+Home+-+Diani/@-4.3608976,39.5487521,17z/data=!3m1!4b1!4m9!3m8!1s0x18404dd071378f39:0xf12c14b1c4db6d9a!5m2!4m1!1i2!8m2!3d-4.360903!4d39.551327!16s%2Fg%2F11srqrjgb3?entry=ttu&g_ep=EgoyMDI1MTExNy4wIKXMDSoASAFQAw%3D%3D";
 
 const galleryImages = [
   { src: pool2, alt: 'Private swimming pool with sun loungers and palm trees at Legacy Holiday Home Diani', title: 'Private Pool' },
@@ -78,6 +79,7 @@ export default function Home() {
         phoneNumber="+254 714 389500"
         location="Diani Coast, Kenya"
         airbnbUrl={AIRBNB_URL}
+        googleMapsUrl={GOOGLE_MAPS_URL}
       />
     </div>
   );

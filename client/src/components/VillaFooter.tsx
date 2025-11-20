@@ -6,6 +6,7 @@ interface VillaFooterProps {
   phoneNumber: string;
   location: string;
   airbnbUrl: string;
+  googleMapsUrl?: string;
 }
 
 export default function VillaFooter({
@@ -13,6 +14,7 @@ export default function VillaFooter({
   phoneNumber,
   location,
   airbnbUrl,
+  googleMapsUrl,
 }: VillaFooterProps) {
   return (
     <footer className="bg-card border-t py-12 px-6">
@@ -55,6 +57,15 @@ export default function VillaFooter({
               >
                 Book on Airbnb
               </button>
+              {googleMapsUrl && (
+                <button
+                  className="text-muted-foreground hover:text-primary transition-colors cursor-pointer block"
+                  onClick={() => window.open(googleMapsUrl, '_blank')}
+                  data-testid="link-footer-maps"
+                >
+                  Location on Maps
+                </button>
+              )}
             </div>
           </div>
         </div>
