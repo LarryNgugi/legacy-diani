@@ -34,12 +34,20 @@ export const bookings = pgTable("bookings", {
 });
 
 export const insertBookingSchema = createInsertSchema(bookings, {
+  name: z.string().min(2, "Name must be at least 2 characters"),
   email: z.string().email("Please enter a valid email address"),
   phone: z.string().min(10, "Please enter a valid phone number"),
   checkIn: z.coerce.date(),
   checkOut: z.coerce.date(),
   adults: z.number().min(1, "At least 1 adult is required"),
   children: z.number().min(0).default(0),
+  specialRequirements: z.string().optional(),
+  totalAmount: z.union([z.string(), z.number()]).transform(val => {
+    const num = typeof val === 'string' ? parseFloat(val) : val;
+    return num.toString();
+  }),
+  paymentStatus: z.string().optional(),
+  stripePaymentId: z.string().optional(),
 }).omit({
   id: true,
   createdAt: true,
