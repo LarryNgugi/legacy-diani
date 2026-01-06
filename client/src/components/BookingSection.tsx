@@ -25,7 +25,12 @@ interface BookingSectionProps {
   phoneNumber: string;
   location: string;
   mapEmbedUrl?: string;
-  pricePerNight: number;
+  seasonalPricing: {
+    low: number;
+    mid: number;
+    peak: number;
+    christmas?: number;
+  };
 }
 
 interface BookingFormData {
@@ -37,6 +42,7 @@ interface BookingFormData {
   adults: number;
   children: number;
   specialRequirements: string;
+  paymentMethod: 'stripe' | 'mpesa';
 }
 
 function PaymentForm({ bookingId, totalAmount, onSuccess }: { bookingId: string; totalAmount: number; onSuccess: () => void }) {
@@ -53,7 +59,6 @@ function PaymentForm({ bookingId, totalAmount, onSuccess }: { bookingId: string;
     }
 
     setIsProcessing(true);
-
     try {
       const { error, paymentIntent } = await stripe.confirmPayment({
         elements,
@@ -136,7 +141,7 @@ export default function BookingSection({
   phoneNumber,
   location,
   mapEmbedUrl,
-  pricePerNight,
+  seasonalPricing,
 }: BookingSectionProps) {
   const [formData, setFormData] = useState<BookingFormData>({
     name: "",
@@ -147,6 +152,7 @@ export default function BookingSection({
     adults: 1,
     children: 0,
     specialRequirements: "",
+    paymentMethod: 'stripe',
   });
 
   const [showPayment, setShowPayment] = useState(false);
@@ -155,11 +161,97 @@ export default function BookingSection({
 
   const { toast } = useToast();
 
+  // Determine season based on check-in date
+  // Season Dates:
+  // Low: Mar 1 – May 31, Oct 1 – Nov 30
+  // Mid: Feb, Jun, Sep, Jul 1–14, Dec 1–14
+  // Peak: Jul 15 – Aug 31, Dec 15 – Jan 5, Easter
+  function isEaster(date: Date) {
+    // Anonymous Gregorian algorithm for Easter Sunday
+    const y = date.getFullYear();
+    const a = y % 19;
+    const b = Math.floor(y / 100);
+    const c = y % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31); // 3=March, 4=April
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    // Easter Friday to Monday
+    const easter = new Date(y, month - 1, day);
+    const goodFriday = new Date(easter);
+    goodFriday.setDate(easter.getDate() - 2);
+    const easterMonday = new Date(easter);
+    easterMonday.setDate(easter.getDate() + 1);
+    return date >= goodFriday && date <= easterMonday;
+  }
+
+  const getSeason = (date: Date | undefined) => {
+    if (!date) return 'low';
+    const month = date.getMonth() + 1;
+    const day = date.getDate();
+
+    // Christmas pricing: Dec 20 – Jan 5
+    if ((month === 12 && day >= 20) || (month === 1 && day <= 5)) return 'christmas';
+
+    // Peak: Jul 15 – Aug 31
+    if ((month === 7 && day >= 15) || (month === 8)) return 'peak';
+    // Peak: Dec 15 – Dec 19
+    if (month === 12 && day >= 15 && day <= 19) return 'peak';
+    // Peak: Easter (Good Friday to Easter Monday)
+    if (isEaster(date)) return 'peak';
+
+    // Low: Mar 1 – May 31
+    if ((month === 3) || (month === 4) || (month === 5)) return 'low';
+    // Low: Oct 1 – Nov 30
+    if ((month === 10) || (month === 11)) return 'low';
+
+    // Mid: Feb
+    if (month === 2) return 'mid';
+    // Mid: Jun
+    if (month === 6) return 'mid';
+    // Mid: Sep
+    if (month === 9) return 'mid';
+    // Mid: Jul 1–14
+    if (month === 7 && day <= 14) return 'mid';
+    // Mid: Dec 1–14
+    if (month === 12 && day <= 14) return 'mid';
+
+    // Default to low
+    return 'low';
+  };
+
+  // Calculate total amount based on season for each night
+  const getNightsArray = (start: Date, end: Date) => {
+    const nights = [];
+    let current = new Date(start);
+    while (current < end) {
+      nights.push(new Date(current));
+      current.setDate(current.getDate() + 1);
+    }
+    return nights;
+  };
+
   const calculateTotalAmount = () => {
     if (!formData.checkIn || !formData.checkOut) return 0;
-    const nights = differenceInDays(formData.checkOut, formData.checkIn);
-    return nights > 0 ? nights * pricePerNight : 0;
+    const nightsArr = getNightsArray(formData.checkIn, formData.checkOut);
+    let total = 0;
+    for (const night of nightsArr) {
+      const season = getSeason(night);
+      total += seasonalPricing[season] ?? seasonalPricing.low;
+    }
+    return total;
   };
+
+  // For display: show the season and price for the first night
+  const displaySeason = getSeason(formData.checkIn);
+  const displayPricePerNight = seasonalPricing[displaySeason] ?? seasonalPricing.low;
 
   const bookingMutation = useMutation({
     mutationFn: async (data: BookingFormData) => {
@@ -167,6 +259,7 @@ export default function BookingSection({
       const response = await apiRequest("POST", "/api/bookings", {
         ...data,
         totalAmount,
+        paymentMethod: data.paymentMethod,
       });
       return response.json();
     },
@@ -175,9 +268,10 @@ export default function BookingSection({
         title: "Booking Details Received!",
         description: "Please proceed with payment to confirm your reservation.",
       });
-      setClientSecret(data.clientSecret);
+      setClientSecret(data.clientSecret || null);
       setBookingId(data.bookingId);
       setShowPayment(true);
+      setMpesaInstructions(data.mpesaInstructions || null);
     },
     onError: (error: any) => {
       toast({
@@ -187,6 +281,8 @@ export default function BookingSection({
       });
     },
   });
+
+  const [mpesaInstructions, setMpesaInstructions] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,12 +315,13 @@ export default function BookingSection({
     setFormData({
       name: "",
       email: "",
-      phone: "",
+      phone: "",  
       checkIn: undefined,
       checkOut: undefined,
       adults: 1,
       children: 0,
       specialRequirements: "",
+      paymentMethod: 'stripe',
     });
   };
 
@@ -409,21 +506,62 @@ export default function BookingSection({
                     />
                   </div>
 
+                  <div>
+                    <Label htmlFor="paymentMethod">Payment Method *</Label>
+                    <Select
+                      value={formData.paymentMethod}
+                      onValueChange={(value) => setFormData({ ...formData, paymentMethod: value as 'stripe' | 'mpesa' })}
+                      required
+                    >
+                      <SelectTrigger id="paymentMethod" data-testid="select-payment-method">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="stripe">Card (Stripe)</SelectItem>
+                        <SelectItem value="mpesa">M-Pesa</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   {nights > 0 && (
                     <div className="bg-primary/10 rounded-md p-4 space-y-2">
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-muted-foreground">
-                          {nights} {nights === 1 ? "night" : "nights"} × ${pricePerNight}
+                          {nights} {nights === 1 ? "night" : "nights"} (seasonal rates applied)
                         </span>
                         <span className="font-semibold" data-testid="text-subtotal">
-                          ${totalAmount}
+                          Ksh {totalAmount}
                         </span>
                       </div>
-                      <div className="border-t pt-2 flex justify-between items-center">
-                        <span className="font-semibold">Total</span>
-                        <span className="text-2xl font-bold text-primary" data-testid="text-total">
-                          ${totalAmount}
-                        </span>
+                      <div className="border-t pt-2 flex flex-col gap-1">
+                        <span className="font-semibold">Breakdown:</span>
+                        {formData.checkIn && formData.checkOut && (() => {
+                          // Group nights by season
+                          const nightsArr = getNightsArray(formData.checkIn, formData.checkOut);
+                          const seasonGroups: { [season: string]: { count: number, price: number } } = {};
+                          for (const night of nightsArr) {
+                            const s = getSeason(night);
+                            let p = seasonalPricing[s] ?? seasonalPricing.low;
+                            if (s === 'christmas' && seasonalPricing.christmas) {
+                              p = seasonalPricing.christmas;
+                            }
+                            if (!seasonGroups[s]) {
+                              seasonGroups[s] = { count: 1, price: p };
+                            } else {
+                              seasonGroups[s].count += 1;
+                            }
+                          }
+                          return Object.entries(seasonGroups).map(([season, { count, price }]) => (
+                            <span key={season} className="text-xs text-muted-foreground">
+                              {count} {count === 1 ? 'night' : 'nights'} × Ksh {price} ({season.charAt(0).toUpperCase() + season.slice(1)} Season)
+                            </span>
+                          ));
+                        })()}
+                        <div className="flex justify-between items-center mt-2">
+                          <span className="font-semibold">Total</span>
+                          <span className="text-2xl font-bold text-primary" data-testid="text-total">
+                            Ksh {totalAmount}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -445,7 +583,7 @@ export default function BookingSection({
               <CardHeader>
                 <CardTitle>Complete Payment</CardTitle>
                 <CardDescription>
-                  Secure payment powered by Stripe
+                  {formData.paymentMethod === 'mpesa' ? 'Pay securely with M-Pesa' : 'Secure payment powered by Stripe'}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -477,7 +615,24 @@ export default function BookingSection({
                   </div>
                 </div>
 
-                {!stripePromise ? (
+                {formData.paymentMethod === 'mpesa' && mpesaInstructions ? (
+                  <div className="text-center p-6 bg-primary/10 rounded-md">
+                    <p className="font-semibold">M-Pesa Payment Instructions</p>
+                    <p className="mt-2">{mpesaInstructions}</p>
+                    <div className="mt-4 text-muted-foreground text-sm">
+                      <p>If you did not receive the STK push, you can pay manually:</p>
+                      <div className="mt-2">
+                        <div>
+                          <span className="font-semibold">Paybill:</span> <span className="font-mono">4161475</span><br />
+                          <span className="font-semibold">Account:</span> <span className="font-mono">{bookingId ? String(bookingId).replace(/[^a-zA-Z0-9]/g, '').substring(0, 4) : 'Booking ID'}</span><br />
+                          <span>Blueprime Venture</span>
+                        </div>
+                      </div>
+                    </div>
+                    <p className="mt-4 text-muted-foreground text-sm">After payment, you will receive a confirmation email.</p>
+                    <Button className="mt-4" onClick={handlePaymentSuccess}>Done</Button>
+                  </div>
+                ) : formData.paymentMethod === 'stripe' && (!stripePromise ? (
                   <div className="text-center p-6 bg-destructive/10 rounded-md">
                     <p className="text-destructive font-semibold">Payment system is not configured.</p>
                     <p className="text-sm text-muted-foreground mt-2">Please contact us directly to complete your booking.</p>
@@ -490,7 +645,7 @@ export default function BookingSection({
                       onSuccess={handlePaymentSuccess}
                     />
                   </Elements>
-                ) : null}
+                ) : null)}
 
                 <Button
                   variant="outline"
@@ -545,7 +700,11 @@ export default function BookingSection({
                   </div>
                   <div>
                     <h3 className="font-semibold mb-1">Pricing</h3>
-                    <p className="text-muted-foreground">${pricePerNight} per night</p>
+                    <ul className="text-muted-foreground text-sm">
+                      <li>Low Season: Ksh {seasonalPricing.low} per night (Mar 1 – May 31, Oct 1 – Nov 30)</li>
+                      <li>Mid Season: Ksh {seasonalPricing.mid} per night (Feb, Jun, Sep, Jul 1–14, Dec 1–14)</li>
+                      <li>Peak Season: Ksh {seasonalPricing.peak} per night (Jul 15 – Aug 31, Dec 15 – Jan 5, Easter)</li>
+                    </ul>
                     <p className="text-sm text-muted-foreground mt-1">
                       Final price shown after date selection
                     </p>

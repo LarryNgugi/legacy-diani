@@ -1,3 +1,5 @@
+import dotenv from "dotenv";
+dotenv.config();
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
@@ -5,6 +7,7 @@ import Stripe from "stripe";
 import nodemailer from "nodemailer";
 import { insertBookingSchema } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
+import axios from "axios";
 
 // Initialize Stripe
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -48,19 +51,162 @@ export async function registerRoutes(app: Express): Promise<Server> {
         paymentStatus: "pending",
       });
 
-      // Create Stripe payment intent
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(parseFloat(bookingData.totalAmount) * 100), // Convert to cents
-        currency: "usd",
-        metadata: {
-          bookingId: booking.id,
-          guestName: bookingData.name,
-          guestEmail: bookingData.email,
-        },
-      });
 
-      // Update booking with Stripe payment ID
-      await storage.updateBookingPaymentId(booking.id, paymentIntent.id);
+      // Determine payment method (default to Stripe if not provided)
+      const paymentMethod = req.body.paymentMethod || 'stripe';
+      let paymentResponse = {};
+      if (paymentMethod === 'stripe') {
+        // Create Stripe payment intent in KSH (Kenyan Shillings)
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(parseFloat(bookingData.totalAmount) * 100), // Stripe expects amount in cents
+          currency: "kes", // KSH currency code
+          metadata: {
+            bookingId: booking.id,
+            guestName: bookingData.name,
+            guestEmail: bookingData.email,
+          },
+        });
+        // Update booking with Stripe payment ID
+        await storage.updateBookingPaymentId(booking.id, paymentIntent.id);
+        paymentResponse = { clientSecret: paymentIntent.client_secret };
+      } else if (paymentMethod === 'mpesa') {
+        // M-Pesa STK Push Integration (Safaricom Daraja API - Production)
+        try {
+          const mpesaConfig = {
+            consumerKey: process.env.MPESA_CONSUMER_KEY,
+            consumerSecret: process.env.MPESA_CONSUMER_SECRET,
+            shortcode: process.env.MPESA_SHORTCODE,
+            passkey: process.env.MPESA_PASSKEY,
+            callbackUrl: process.env.MPESA_CALLBACK_URL,
+          };
+
+          // Validate M-Pesa configuration
+          if (!mpesaConfig.consumerKey || !mpesaConfig.consumerSecret || 
+              !mpesaConfig.shortcode || !mpesaConfig.passkey || !mpesaConfig.callbackUrl) {
+            return res.status(500).json({ 
+              message: 'M-Pesa configuration is incomplete. Please contact support.' 
+            });
+          }
+
+          // Determine if using production or sandbox
+          const isProduction = process.env.MPESA_ENV === 'production';
+          console.log('MPESA_ENV:', process.env.MPESA_ENV);
+          console.log('isProduction:', isProduction);
+          const baseUrl = isProduction 
+            ? 'https://api.safaricom.co.ke' 
+            : 'https://sandbox.safaricom.co.ke';
+          console.log('Using M-Pesa URL:', baseUrl);
+
+          // 1. Get OAuth token
+          const auth = Buffer.from(`${mpesaConfig.consumerKey}:${mpesaConfig.consumerSecret}`).toString('base64');
+          
+          let tokenRes;
+          try {
+            tokenRes = await axios.get(
+              `${baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
+              { 
+                headers: { 
+                  Authorization: `Basic ${auth}`,
+                  'Content-Type': 'application/json'
+                } 
+              }
+            );
+          } catch (tokenError: any) {
+            console.error("M-Pesa OAuth Error:", tokenError.response?.data || tokenError.message);
+            return res.status(500).json({ 
+              message: 'Failed to authenticate with M-Pesa',
+              details: tokenError.response?.data || tokenError.message
+            });
+          }
+
+          if (!tokenRes.data.access_token) {
+            return res.status(500).json({ 
+              message: 'Failed to get M-Pesa access token' 
+            });
+          }
+
+          const accessToken = tokenRes.data.access_token;
+
+          // 2. Prepare STK Push request
+          const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, '').slice(0, 14);
+          const password = Buffer.from(`${mpesaConfig.shortcode}${mpesaConfig.passkey}${timestamp}`).toString('base64');
+          
+          // Format phone number to 254XXXXXXXXX
+          let phone = bookingData.phone.trim();
+          phone = phone.replace(/^\+/, '').replace(/^0/, '254');
+          if (!phone.startsWith('254')) {
+            phone = '254' + phone;
+          }
+
+          const amount = Math.round(parseFloat(bookingData.totalAmount));
+
+          const stkPayload = {
+            BusinessShortCode: mpesaConfig.shortcode,
+            Password: password,
+            Timestamp: timestamp,
+            TransactionType: "CustomerPayBillOnline",
+            Amount: amount,
+            PartyA: phone,
+            PartyB: mpesaConfig.shortcode,
+            PhoneNumber: phone,
+            CallBackURL: mpesaConfig.callbackUrl,
+            // Use the same 4-character alphanumeric booking ID as frontend
+            AccountReference: String(booking.id).replace(/[^a-zA-Z0-9]/g, '').substring(0, 4),
+            TransactionDesc: `Booking for ${bookingData.name}`,
+          };
+
+          console.log('M-Pesa STK Push Request:', {
+            ...stkPayload,
+            Password: '***HIDDEN***',
+            environment: isProduction ? 'production' : 'sandbox'
+          });
+
+          // 3. Send STK Push
+          let stkRes;
+          try {
+            stkRes = await axios.post(
+              `${baseUrl}/mpesa/stkpush/v1/processrequest`,
+              stkPayload,
+              { 
+                headers: { 
+                  Authorization: `Bearer ${accessToken}`,
+                  'Content-Type': 'application/json'
+                } 
+              }
+            );
+          } catch (stkError: any) {
+            console.error("M-Pesa STK Push Error:", stkError.response?.data || stkError.message);
+            return res.status(500).json({ 
+              message: 'Failed to initiate M-Pesa payment',
+              details: stkError.response?.data || stkError.message
+            });
+          }
+
+          console.log('M-Pesa STK Push Response:', stkRes.data);
+
+          // 4. Handle response
+          if (stkRes.data.ResponseCode === "0") {
+            paymentResponse = {
+              mpesaInstructions: `A payment request has been sent to ${phone}. Please enter your M-Pesa PIN on your phone to complete the payment.`,
+              mpesaCheckoutRequestID: stkRes.data.CheckoutRequestID,
+            };
+            await storage.updateBookingPaymentId(booking.id, stkRes.data.CheckoutRequestID);
+          } else {
+            return res.status(500).json({ 
+              message: 'Failed to initiate M-Pesa STK Push', 
+              details: stkRes.data 
+            });
+          }
+        } catch (mpesaError: any) {
+          console.error("M-Pesa Integration Error:", mpesaError);
+          return res.status(500).json({ 
+            message: 'M-Pesa payment processing failed',
+            error: mpesaError.message 
+          });
+        }
+      } else {
+        return res.status(400).json({ message: 'Unsupported payment method' });
+      }
 
       // Send email notification to host
       const checkInDate = new Date(bookingData.checkIn).toLocaleDateString('en-US', {
@@ -140,7 +286,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 ` : ''}
                 
                 <div class="total">
-                  Total: $${bookingData.totalAmount}
+                  Total: Ksh ${bookingData.totalAmount}
                 </div>
               </div>
               
@@ -173,7 +319,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.json({
         bookingId: booking.id,
-        clientSecret: paymentIntent.client_secret,
+        ...paymentResponse,
       });
     } catch (error: any) {
       console.error("Booking error:", error);
@@ -182,6 +328,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
         error: error.message 
       });
     }
+  });
+
+  // M-Pesa callback endpoint
+  app.post("/api/mpesa-callback", async (req, res) => {
+    console.log("M-Pesa Callback received:", JSON.stringify(req.body, null, 2));
+    
+    try {
+      const { Body } = req.body;
+      
+      if (Body?.stkCallback) {
+        const { ResultCode, ResultDesc, CheckoutRequestID, CallbackMetadata } = Body.stkCallback;
+        
+        if (ResultCode === 0) {
+          // Payment successful
+          console.log("M-Pesa payment successful:", CheckoutRequestID);
+          
+          // Extract payment details
+          const metadata = CallbackMetadata?.Item || [];
+          const mpesaReceiptNumber = metadata.find((item: any) => item.Name === "MpesaReceiptNumber")?.Value;
+          
+          // Find booking by CheckoutRequestID and update status
+          // You'll need to implement a method in storage to find booking by stripePaymentId
+          // For now, just log it
+          console.log("Payment Receipt Number:", mpesaReceiptNumber);
+          
+          // Update booking payment status to paid
+          // await storage.updateBookingPaymentStatusByCheckoutId(CheckoutRequestID, "paid");
+          
+        } else {
+          // Payment failed
+          console.log("M-Pesa payment failed:", ResultDesc);
+        }
+      }
+    } catch (error: any) {
+      console.error("M-Pesa callback error:", error);
+    }
+    
+    // Always respond to Safaricom
+    res.json({ ResultCode: 0, ResultDesc: "Success" });
   });
 
   // Confirm payment and generate receipt
@@ -313,7 +498,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 </div>
                 
                 <div class="total">
-                  Total Paid: $${booking.totalAmount}
+                  Total Paid: Ksh ${booking.totalAmount}
                 </div>
               </div>
               
@@ -392,7 +577,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   <span class="detail-value">${checkOutDate}</span>
                 </div>
                 <div class="total">
-                  Amount Received: $${booking.totalAmount}
+                  Amount Received: Ksh ${booking.totalAmount}
                 </div>
               </div>
               
