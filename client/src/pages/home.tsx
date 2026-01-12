@@ -31,6 +31,20 @@ const galleryImages = [
   { src: pool1, alt: 'Pool area with umbrella and blue loungers surrounded by tropical garden', title: 'Pool Lounging Area' },
   { src: pool3, alt: 'Full view of the villa and pool with lush tropical landscaping', title: 'Villa & Pool View' },
   { src: pool4, alt: 'Pristine swimming pool with palm trees and clear blue sky', title: 'Pool Paradise' },
+  // Video 1
+  {
+    src: '/Video%202_1763677498357.mov',
+    alt: 'Walkthrough video of Legacy Holiday Home Diani',
+    title: 'Villa Walkthrough',
+    type: 'video' as const,
+  },
+  // Video 2
+  {
+    src: '/WhatsApp%20Video%202025-07-15%20at%2010.20.18_d6d91812_1763677498358.mp4',
+    alt: 'WhatsApp video tour of Legacy Holiday Home Diani',
+    title: 'WhatsApp Video Tour',
+    type: 'video' as const,
+  },
   { src: bedroom1, alt: 'Master bedroom with elegant canopy bed and mosquito net', title: 'Master Bedroom' },
   { src: bedroom2, alt: 'Spacious bedroom with canopy bed and wooden accents', title: 'Guest Bedroom' },
   { src: bedroom3, alt: 'Comfortable bedroom with garden views', title: 'Bedroom with View' },
@@ -59,7 +73,7 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen">
+    <div className="">
       <HeroSection
         backgroundImage={poolHero}
         villaName="Legacy Holiday Home Diani"

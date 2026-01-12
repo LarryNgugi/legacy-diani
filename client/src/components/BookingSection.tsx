@@ -11,14 +11,9 @@ import { format, differenceInDays } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
-import { loadStripe } from "@stripe/stripe-js";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-const stripePromise = import.meta.env.VITE_STRIPE_PUBLIC_KEY 
-  ? loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY)
-  : null;
 
 interface BookingSectionProps {
   hostName: string;
@@ -42,99 +37,9 @@ interface BookingFormData {
   adults: number;
   children: number;
   specialRequirements: string;
-  paymentMethod: 'stripe' | 'mpesa';
+  paymentMethod: 'mpesa' | 'paystack';
 }
 
-function PaymentForm({ bookingId, totalAmount, onSuccess }: { bookingId: string; totalAmount: number; onSuccess: () => void }) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const { toast } = useToast();
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!stripe || !elements) {
-      return;
-    }
-
-    setIsProcessing(true);
-    try {
-      const { error, paymentIntent } = await stripe.confirmPayment({
-        elements,
-        confirmParams: {
-          return_url: window.location.origin + "?payment=success",
-        },
-        redirect: "if_required",
-      });
-
-      if (error) {
-        setIsProcessing(false);
-        toast({
-          title: "Payment Failed",
-          description: error.message,
-          variant: "destructive",
-        });
-        return;
-      }
-
-      if (paymentIntent && paymentIntent.status === "succeeded") {
-        // Confirm payment with backend
-        const response = await apiRequest("POST", "/api/bookings/confirm-payment", {
-          bookingId,
-          paymentIntentId: paymentIntent.id,
-        });
-
-        const data = await response.json();
-
-        setIsProcessing(false);
-
-        if (!response.ok) {
-          toast({
-            title: "Payment Confirmation Failed",
-            description: data.message || "Please contact us to verify your booking.",
-            variant: "destructive",
-          });
-          return;
-        }
-
-        toast({
-          title: "Payment Successful!",
-          description: "Your booking is confirmed. Check your email for the receipt. We'll be in touch soon!",
-        });
-        onSuccess();
-      } else {
-        setIsProcessing(false);
-        toast({
-          title: "Payment Processing",
-          description: "Payment is being processed. We'll send you an email confirmation.",
-        });
-      }
-    } catch (err: any) {
-      setIsProcessing(false);
-      toast({
-        title: "Error",
-        description: err.message || "An unexpected error occurred.",
-        variant: "destructive",
-      });
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      <PaymentElement />
-      <Button
-        type="submit"
-        disabled={!stripe || isProcessing}
-        className="w-full"
-        size="lg"
-        data-testid="button-confirm-payment"
-      >
-        {isProcessing ? "Processing..." : `Pay $${totalAmount.toFixed(2)}`}
-      </Button>
-    </form>
-  );
-}
 
 export default function BookingSection({
   hostName,
@@ -152,8 +57,9 @@ export default function BookingSection({
     adults: 1,
     children: 0,
     specialRequirements: "",
-    paymentMethod: 'stripe',
+    paymentMethod: 'mpesa',
   });
+  const [paystackPaymentUrl, setPaystackPaymentUrl] = useState<string | null>(null);
 
   const [showPayment, setShowPayment] = useState(false);
   const [clientSecret, setClientSecret] = useState<string | null>(null);
@@ -272,6 +178,10 @@ export default function BookingSection({
       setBookingId(data.bookingId);
       setShowPayment(true);
       setMpesaInstructions(data.mpesaInstructions || null);
+      if (formData.paymentMethod === 'paystack' && data.paymentUrl) {
+        setPaystackPaymentUrl(data.paymentUrl);
+        window.location.href = data.paymentUrl;
+      }
     },
     onError: (error: any) => {
       toast({
@@ -321,7 +231,7 @@ export default function BookingSection({
       adults: 1,
       children: 0,
       specialRequirements: "",
-      paymentMethod: 'stripe',
+      paymentMethod: 'mpesa',
     });
   };
 
@@ -510,15 +420,15 @@ export default function BookingSection({
                     <Label htmlFor="paymentMethod">Payment Method *</Label>
                     <Select
                       value={formData.paymentMethod}
-                      onValueChange={(value) => setFormData({ ...formData, paymentMethod: value as 'stripe' | 'mpesa' })}
+                      onValueChange={(value) => setFormData({ ...formData, paymentMethod: value as 'mpesa' | 'paystack' })}
                       required
                     >
                       <SelectTrigger id="paymentMethod" data-testid="select-payment-method">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="stripe">Card (Stripe)</SelectItem>
                         <SelectItem value="mpesa">M-Pesa</SelectItem>
+                        <SelectItem value="paystack">Card</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -583,7 +493,7 @@ export default function BookingSection({
               <CardHeader>
                 <CardTitle>Complete Payment</CardTitle>
                 <CardDescription>
-                  {formData.paymentMethod === 'mpesa' ? 'Pay securely with M-Pesa' : 'Secure payment powered by Stripe'}
+                  {formData.paymentMethod === 'mpesa' ? 'Pay securely with M-Pesa' : 'Pay securely with Paystack'}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -632,20 +542,12 @@ export default function BookingSection({
                     <p className="mt-4 text-muted-foreground text-sm">After payment, you will receive a confirmation email.</p>
                     <Button className="mt-4" onClick={handlePaymentSuccess}>Done</Button>
                   </div>
-                ) : formData.paymentMethod === 'stripe' && (!stripePromise ? (
-                  <div className="text-center p-6 bg-destructive/10 rounded-md">
-                    <p className="text-destructive font-semibold">Payment system is not configured.</p>
-                    <p className="text-sm text-muted-foreground mt-2">Please contact us directly to complete your booking.</p>
+                ) : formData.paymentMethod === 'paystack' && paystackPaymentUrl ? (
+                  <div className="text-center p-6 bg-primary/10 rounded-md">
+                    <p className="font-semibold">Redirecting to Paystack...</p>
+                    <p className="mt-2">If you are not redirected, <a href={paystackPaymentUrl} className="text-primary underline">click here</a> to pay securely via Paystack.</p>
                   </div>
-                ) : clientSecret ? (
-                  <Elements stripe={stripePromise} options={{ clientSecret }}>
-                    <PaymentForm
-                      bookingId={bookingId!}
-                      totalAmount={totalAmount}
-                      onSuccess={handlePaymentSuccess}
-                    />
-                  </Elements>
-                ) : null)}
+                ) : null}
 
                 <Button
                   variant="outline"
@@ -694,22 +596,8 @@ export default function BookingSection({
                   </div>
                 </div>
 
-                <div className="flex items-start gap-4">
-                  <div className="bg-primary/10 p-3 rounded-md">
-                    <DollarSign className="w-6 h-6 text-primary" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold mb-1">Pricing</h3>
-                    <ul className="text-muted-foreground text-sm">
-                      <li>Low Season: Ksh {seasonalPricing.low} per night (Mar 1 – May 31, Oct 1 – Nov 30)</li>
-                      <li>Mid Season: Ksh {seasonalPricing.mid} per night (Feb, Jun, Sep, Jul 1–14, Dec 1–14)</li>
-                      <li>Peak Season: Ksh {seasonalPricing.peak} per night (Jul 15 – Aug 31, Dec 15 – Jan 5, Easter)</li>
-                    </ul>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Final price shown after date selection
-                    </p>
-                  </div>
-                </div>
+                
+               
               </CardContent>
             </Card>
 

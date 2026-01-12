@@ -1,0 +1,29 @@
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+
+# Local config
+.local/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+dist/
+build/
+
+# Misc
+*.swp
+*.swo
+
+# VSCode
+.vscode/
+
+# Ignore attached assets (optional, remove if you want to track these)
+attached_assets/

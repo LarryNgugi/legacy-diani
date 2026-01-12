@@ -3,19 +3,11 @@ dotenv.config();
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import Stripe from "stripe";
 import nodemailer from "nodemailer";
 import { insertBookingSchema } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
 import axios from "axios";
 
-// Initialize Stripe
-if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error('Missing required Stripe secret: STRIPE_SECRET_KEY');
-}
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2025-11-17.clover",
-});
 
 // Initialize email transporter
 const transporter = nodemailer.createTransport({
@@ -52,23 +44,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
 
-      // Determine payment method (default to Stripe if not provided)
-      const paymentMethod = req.body.paymentMethod || 'stripe';
+      // Determine payment method (default to Paystack if not provided)
+      const paymentMethod = req.body.paymentMethod || 'paystack';
       let paymentResponse = {};
-      if (paymentMethod === 'stripe') {
-        // Create Stripe payment intent in KSH (Kenyan Shillings)
-        const paymentIntent = await stripe.paymentIntents.create({
-          amount: Math.round(parseFloat(bookingData.totalAmount) * 100), // Stripe expects amount in cents
-          currency: "kes", // KSH currency code
-          metadata: {
-            bookingId: booking.id,
-            guestName: bookingData.name,
-            guestEmail: bookingData.email,
-          },
-        });
-        // Update booking with Stripe payment ID
-        await storage.updateBookingPaymentId(booking.id, paymentIntent.id);
-        paymentResponse = { clientSecret: paymentIntent.client_secret };
+      if (paymentMethod === 'paystack') {
+        // Paystack Card Payment Integration
+        try {
+          const paystackConfig = {
+            secretKey: process.env.PAYSTACK_SECRET_KEY,
+            callbackUrl: process.env.PAYSTACK_CALLBACK_URL,
+          };
+
+          if (!paystackConfig.secretKey || !paystackConfig.callbackUrl) {
+            console.error("Paystack config missing:", paystackConfig);
+            return res.status(500).json({ message: 'Paystack configuration is incomplete. Please contact support.' });
+          }
+
+          // 1. Initiate Paystack transaction
+          const amountKobo = Math.round(parseFloat(bookingData.totalAmount) * 100); // Paystack expects amount in kobo
+          const paystackPayload = {
+            email: bookingData.email,
+            amount: amountKobo,
+            callback_url: paystackConfig.callbackUrl,
+            metadata: {
+              bookingId: booking.id,
+              name: bookingData.name,
+              phone: bookingData.phone,
+            }
+          };
+
+          let paystackRes;
+          try {
+            console.log("Paystack Init Request:", {
+              url: "https://api.paystack.co/transaction/initialize",
+              body: paystackPayload
+            });
+            paystackRes = await axios.post(
+              "https://api.paystack.co/transaction/initialize",
+              paystackPayload,
+              {
+                headers: {
+                  Authorization: `Bearer ${paystackConfig.secretKey}`,
+                  'Content-Type': 'application/json'
+                }
+              }
+            );
+            console.log("Paystack Init Response:", paystackRes.data);
+          } catch (paystackError: any) {
+            console.error("Paystack Init Error:", paystackError.response?.data || paystackError.message);
+            return res.status(500).json({ message: 'Failed to initiate Paystack payment', details: paystackError.response?.data || paystackError.message });
+          }
+
+          if (!paystackRes.data || !paystackRes.data.data || !paystackRes.data.data.authorization_url) {
+            console.error("Paystack response missing authorization_url:", paystackRes.data);
+            return res.status(500).json({ message: 'Failed to get Paystack payment URL', details: paystackRes.data });
+          }
+
+          paymentResponse = { paymentUrl: paystackRes.data.data.authorization_url };
+          await storage.updateBookingPaymentId(booking.id, paystackRes.data.data.reference);
+        } catch (paystackError: any) {
+          console.error("Paystack payment processing failed:", paystackError);
+          return res.status(500).json({ message: 'Paystack payment processing failed', error: paystackError.message });
+        }
       } else if (paymentMethod === 'mpesa') {
         // M-Pesa STK Push Integration (Safaricom Daraja API - Production)
         try {
@@ -83,6 +120,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Validate M-Pesa configuration
           if (!mpesaConfig.consumerKey || !mpesaConfig.consumerSecret || 
               !mpesaConfig.shortcode || !mpesaConfig.passkey || !mpesaConfig.callbackUrl) {
+            console.error("M-Pesa config missing:", mpesaConfig);
             return res.status(500).json({ 
               message: 'M-Pesa configuration is incomplete. Please contact support.' 
             });
@@ -102,6 +140,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           
           let tokenRes;
           try {
+            console.log("M-Pesa OAuth Request:", {
+              url: `${baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
+              headers: { Authorization: `Basic ${auth}` }
+            });
             tokenRes = await axios.get(
               `${baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
               { 
@@ -111,8 +153,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 } 
               }
             );
+            console.log("M-Pesa OAuth Response:", tokenRes.data);
           } catch (tokenError: any) {
-            console.error("M-Pesa OAuth Error:", tokenError.response?.data || tokenError.message);
+            console.error("M-Pesa OAuth Error:", tokenError.response?.data || tokenError.message, {
+              url: `${baseUrl}/oauth/v1/generate?grant_type=client_credentials`
+            });
             return res.status(500).json({ 
               message: 'Failed to authenticate with M-Pesa',
               details: tokenError.response?.data || tokenError.message
@@ -120,6 +165,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           if (!tokenRes.data.access_token) {
+            console.error("M-Pesa OAuth response missing access_token:", tokenRes.data);
             return res.status(500).json({ 
               message: 'Failed to get M-Pesa access token' 
             });
@@ -156,9 +202,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           };
 
           console.log('M-Pesa STK Push Request:', {
-            ...stkPayload,
-            Password: '***HIDDEN***',
-            environment: isProduction ? 'production' : 'sandbox'
+            url: `${baseUrl}/mpesa/stkpush/v1/processrequest`,
+            headers: { Authorization: `Bearer ${accessToken}` },
+            body: { ...stkPayload, Password: '***HIDDEN***', environment: isProduction ? 'production' : 'sandbox' }
           });
 
           // 3. Send STK Push
@@ -174,15 +220,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 } 
               }
             );
+            console.log('M-Pesa STK Push Response:', stkRes.data);
           } catch (stkError: any) {
-            console.error("M-Pesa STK Push Error:", stkError.response?.data || stkError.message);
+            console.error("M-Pesa STK Push Error:", stkError.response?.data || stkError.message, {
+              url: `${baseUrl}/mpesa/stkpush/v1/processrequest`,
+              body: { ...stkPayload, Password: '***HIDDEN***' }
+            });
             return res.status(500).json({ 
               message: 'Failed to initiate M-Pesa payment',
               details: stkError.response?.data || stkError.message
             });
           }
-
-          console.log('M-Pesa STK Push Response:', stkRes.data);
 
           // 4. Handle response
           if (stkRes.data.ResponseCode === "0") {
@@ -192,6 +240,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             };
             await storage.updateBookingPaymentId(booking.id, stkRes.data.CheckoutRequestID);
           } else {
+            console.error("M-Pesa STK Push failed:", stkRes.data);
             return res.status(500).json({ 
               message: 'Failed to initiate M-Pesa STK Push', 
               details: stkRes.data 
@@ -306,7 +355,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       try {
         await transporter.sendMail({
-          from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
+          from: '"Legacy Holiday Home Diani" <noreply@legacyholidayhome.co.ke>',
           to: "bettirosengugi@gmail.com",
           subject: `New Booking Request from ${bookingData.name}`,
           html: emailHtml,
@@ -333,284 +382,441 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // M-Pesa callback endpoint
   app.post("/api/mpesa-callback", async (req, res) => {
     console.log("M-Pesa Callback received:", JSON.stringify(req.body, null, 2));
-    
     try {
       const { Body } = req.body;
-      
       if (Body?.stkCallback) {
         const { ResultCode, ResultDesc, CheckoutRequestID, CallbackMetadata } = Body.stkCallback;
-        
         if (ResultCode === 0) {
           // Payment successful
           console.log("M-Pesa payment successful:", CheckoutRequestID);
-          
-          // Extract payment details
           const metadata = CallbackMetadata?.Item || [];
           const mpesaReceiptNumber = metadata.find((item: any) => item.Name === "MpesaReceiptNumber")?.Value;
-          
-          // Find booking by CheckoutRequestID and update status
-          // You'll need to implement a method in storage to find booking by stripePaymentId
-          // For now, just log it
-          console.log("Payment Receipt Number:", mpesaReceiptNumber);
-          
           // Update booking payment status to paid
-          // await storage.updateBookingPaymentStatusByCheckoutId(CheckoutRequestID, "paid");
-          
+          await storage.updateBookingPaymentStatusByCheckoutId(CheckoutRequestID, "paid");
+          const booking = await storage.getBookingByCheckoutId(CheckoutRequestID);
+          if (booking) {
+            // Prepare email HTML for receipt
+            const checkInDate = new Date(booking.checkIn).toLocaleDateString('en-US', {
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            });
+            const checkOutDate = new Date(booking.checkOut).toLocaleDateString('en-US', {
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            });
+
+            const receiptHtml = `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <style>
+                  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                  .header { background-color: #C96846; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+                  .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
+                  .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+                  .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+                  .detail-label { font-weight: bold; color: #666; }
+                  .detail-value { color: #333; }
+                  .total { font-size: 24px; color: #C96846; font-weight: bold; text-align: right; margin-top: 15px; }
+                  .footer { text-align: center; margin-top: 20px; color: #666; font-size: 14px; }
+                  .success-badge { background-color: #10B981; color: white; padding: 10px 20px; border-radius: 5px; display: inline-block; margin: 20px 0; }
+                </style>
+              </head>
+              <body>
+                <div class="container">
+                  <div class="header">
+                    <h1>Booking Confirmation & Receipt</h1>
+                    <p>Legacy Holiday Home Diani</p>
+                  </div>
+                  <div class="content">
+                    <div class="success-badge">Payment Confirmed</div>
+                    
+                    <p>Dear ${booking.name},</p>
+                    <p>Thank you for your payment! Your booking at Legacy Holiday Home Diani has been confirmed.</p>
+                    
+                    <div class="booking-details">
+                      <h2 style="color: #C96846; margin-top: 0;">Booking Details</h2>
+                      <div class="detail-row">
+                        <span class="detail-label">Booking ID:</span>
+                        <span class="detail-value">${booking.id}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Guest Name:</span>
+                        <span class="detail-value">${booking.name}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Email:</span>
+                        <span class="detail-value">${booking.email}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Phone:</span>
+                        <span class="detail-value">${booking.phone}</span>
+                      </div>
+                      
+                      <h2 style="color: #C96846; margin-top: 30px;">Stay Details</h2>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-in:</span>
+                        <span class="detail-value">${checkInDate}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-out:</span>
+                        <span class="detail-value">${checkOutDate}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Guests:</span>
+                        <span class="detail-value">${booking.adults} ${booking.adults === 1 ? 'Adult' : 'Adults'}, ${booking.children} ${booking.children === 1 ? 'Child' : 'Children'}</span>
+                      </div>
+                      
+                      ${booking.specialRequirements ? `
+                        <h2 style="color: #C96846; margin-top: 30px;">Special Requirements</h2>
+                        <p style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                          ${booking.specialRequirements}
+                        </p>
+                      ` : ''}
+                      
+                      <h2 style="color: #C96846; margin-top: 30px;">Payment Summary</h2>
+                      <div class="detail-row">
+                        <span class="detail-label">Payment Status:</span>
+                        <span class="detail-value" style="color: #10B981; font-weight: bold;">PAID</span>
+                      </div>
+                      <div class="total">
+                        Total Paid: Ksh ${booking.totalAmount}
+                      </div>
+                    </div>
+                    
+                    <p style="margin-top: 30px;">
+                      Larry will be in touch soon to confirm your arrival details and answer any questions you may have.
+                    </p>
+                    
+                    <p>
+                      For any immediate questions, please contact:<br>
+                      <strong>Phone:</strong> +254 714 389500<br>
+                      <strong>Location:</strong> Diani Coast, Kenya
+                    </p>
+                    
+                    <p>We look forward to welcoming you to Legacy Holiday Home Diani!</p>
+                  </div>
+                  <div class="footer">
+                    <p>This is your official booking confirmation and payment receipt.</p>
+                    <p>Legacy Holiday Home Diani - Your Luxury Escape Awaits</p>
+                  </div>
+                </div>
+              </body>
+              </html>
+            `;
+
+            // Host notification HTML
+            const hostNotificationHtml = `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <style>
+                  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                  .header { background-color: #10B981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+                  .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
+                  .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+                  .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+                  .detail-label { font-weight: bold; color: #666; }
+                  .detail-value { color: #333; }
+                  .total { font-size: 24px; color: #10B981; font-weight: bold; text-align: right; margin-top: 15px; }
+                </style>
+              </head>
+              <body>
+                <div class="container">
+                  <div class="header">
+                    <h1>Payment Received</h1>
+                    <p>Booking #${booking.id.substring(0, 8)}</p>
+                  </div>
+                  <div class="content">
+                    <p>Hi Larry,</p>
+                    <p>Great news! Payment has been received for the booking from ${booking.name}.</p>
+                    <div class="booking-details">
+                      <div class="detail-row">
+                        <span class="detail-label">Guest:</span>
+                        <span class="detail-value">${booking.name}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-in:</span>
+                        <span class="detail-value">${checkInDate}</span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-out:</span>
+                        <span class="detail-value">${checkOutDate}</span>
+                      </div>
+                      <div class="total">
+                        Amount Received: Ksh ${booking.totalAmount}
+                      </div>
+                    </div>
+                    <p>The guest has been sent a confirmation email with their receipt. Please reach out to confirm their arrival arrangements.</p>
+                  </div>
+                </div>
+              </body>
+              </html>
+            `;
+
+            // Send confirmation email to client
+            try {
+              await transporter.sendMail({
+                from: '"Legacy Holiday Home Diani" <info@legacyholidayhome.co.ke>',
+                to: booking.email,
+                subject: `Booking Confirmed - Legacy Holiday Home Diani`,
+                html: receiptHtml,
+              });
+              console.log("Receipt email sent to guest successfully");
+            } catch (emailError: any) {
+              console.error("Failed to send receipt email to guest:", emailError.message);
+            }
+            // Send payment confirmation to host
+            try {
+              await transporter.sendMail({
+                from: '"Legacy Holiday Home Diani" <info@legacyholidayhome.co.ke>',
+                to: "larry.josephgithaka@gmail.com",
+                cc: "bettirosengugi@gmail.com",
+                subject: `Payment Received - ${booking.name}`,
+                html: hostNotificationHtml,
+              });
+              console.log("Payment confirmation email sent to host successfully");
+            } catch (emailError: any) {
+              console.error("Failed to send payment confirmation to host:", emailError.message);
+            }
+          }
         } else {
-          // Payment failed
           console.log("M-Pesa payment failed:", ResultDesc);
         }
       }
     } catch (error: any) {
       console.error("M-Pesa callback error:", error);
     }
-    
-    // Always respond to Safaricom
     res.json({ ResultCode: 0, ResultDesc: "Success" });
   });
 
-  // Confirm payment and generate receipt
-  app.post("/api/bookings/confirm-payment", async (req, res) => {
+  // Paystack callback endpoint
+  app.get("/payment/callback", async (req, res) => {
+    console.log("Paystack callback received:", req.query);
+    const { reference } = req.query;
+    if (!reference) {
+      return res.status(400).send("Missing payment reference.");
+    }
     try {
-      const { bookingId, paymentIntentId } = req.body;
-
-      if (!bookingId || !paymentIntentId) {
-        return res.status(400).json({
-          message: "Missing required fields: bookingId and paymentIntentId"
-        });
-      }
-
-      // Verify payment intent with Stripe
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-
-      if (paymentIntent.status !== "succeeded") {
-        return res.status(400).json({
-          message: "Payment has not been completed",
-          status: paymentIntent.status
-        });
-      }
-
-      // Update booking payment status
-      await storage.updateBookingPaymentStatus(bookingId, "paid");
-
-      // Get booking details for receipt
-      const booking = await storage.getBooking(bookingId);
-
-      if (!booking) {
-        return res.status(404).json({
-          message: "Booking not found"
-        });
-      }
-
-      // Format dates for receipt
-      const checkInDate = new Date(booking.checkIn).toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
+      const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
+      const verifyUrl = `https://api.paystack.co/transaction/verify/${reference}`;
+      const paystackRes = await axios.get(verifyUrl, {
+        headers: {
+          Authorization: `Bearer ${paystackSecret}`,
+          'Content-Type': 'application/json'
+        }
       });
-      const checkOutDate = new Date(booking.checkOut).toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
+      console.log("Paystack verification response:", paystackRes.data);
+      const status = paystackRes.data?.data?.status;
+      const bookingId = paystackRes.data?.data?.metadata?.bookingId;
+      if (status === "success" && bookingId) {
+        await storage.updateBookingPaymentStatus(bookingId, "paid");
+        const booking = await storage.getBooking(bookingId);
+        if (booking) {
+          // Prepare email HTML for receipt
+          const checkInDate = new Date(booking.checkIn).toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          });
+          const checkOutDate = new Date(booking.checkOut).toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          });
 
-      // Send confirmation email with receipt to guest
-      const receiptHtml = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background-color: #C96846; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
-            .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
-            .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
-            .detail-label { font-weight: bold; color: #666; }
-            .detail-value { color: #333; }
-            .total { font-size: 24px; color: #C96846; font-weight: bold; text-align: right; margin-top: 15px; }
-            .footer { text-align: center; margin-top: 20px; color: #666; font-size: 14px; }
-            .success-badge { background-color: #10B981; color: white; padding: 10px 20px; border-radius: 5px; display: inline-block; margin: 20px 0; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>Booking Confirmation & Receipt</h1>
-              <p>Legacy Holiday Home Diani</p>
-            </div>
-            <div class="content">
-              <div class="success-badge">Payment Confirmed</div>
-              
-              <p>Dear ${booking.name},</p>
-              <p>Thank you for your payment! Your booking at Legacy Holiday Home Diani has been confirmed.</p>
-              
-              <div class="booking-details">
-                <h2 style="color: #C96846; margin-top: 0;">Booking Details</h2>
-                <div class="detail-row">
-                  <span class="detail-label">Booking ID:</span>
-                  <span class="detail-value">${booking.id}</span>
+          const receiptHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background-color: #C96846; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+                .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
+                .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+                .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+                .detail-label { font-weight: bold; color: #666; }
+                .detail-value { color: #333; }
+                .total { font-size: 24px; color: #C96846; font-weight: bold; text-align: right; margin-top: 15px; }
+                .footer { text-align: center; margin-top: 20px; color: #666; font-size: 14px; }
+                .success-badge { background-color: #10B981; color: white; padding: 10px 20px; border-radius: 5px; display: inline-block; margin: 20px 0; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+                <div class="header">
+                  <h1>Booking Confirmation & Receipt</h1>
+                  <p>Legacy Holiday Home Diani</p>
                 </div>
-                <div class="detail-row">
-                  <span class="detail-label">Guest Name:</span>
-                  <span class="detail-value">${booking.name}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Email:</span>
-                  <span class="detail-value">${booking.email}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Phone:</span>
-                  <span class="detail-value">${booking.phone}</span>
-                </div>
-                
-                <h2 style="color: #C96846; margin-top: 30px;">Stay Details</h2>
-                <div class="detail-row">
-                  <span class="detail-label">Check-in:</span>
-                  <span class="detail-value">${checkInDate}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Check-out:</span>
-                  <span class="detail-value">${checkOutDate}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Guests:</span>
-                  <span class="detail-value">${booking.adults} ${booking.adults === 1 ? 'Adult' : 'Adults'}, ${booking.children} ${booking.children === 1 ? 'Child' : 'Children'}</span>
-                </div>
-                
-                ${booking.specialRequirements ? `
-                  <h2 style="color: #C96846; margin-top: 30px;">Special Requirements</h2>
-                  <p style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                    ${booking.specialRequirements}
+                <div class="content">
+                  <div class="success-badge">Payment Confirmed</div>
+                  
+                  <p>Dear ${booking.name},</p>
+                  <p>Thank you for your payment! Your booking at Legacy Holiday Home Diani has been confirmed.</p>
+                  
+                  <div class="booking-details">
+                    <h2 style="color: #C96846; margin-top: 0;">Booking Details</h2>
+                    <div class="detail-row">
+                      <span class="detail-label">Booking ID:</span>
+                      <span class="detail-value">${booking.id}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Guest Name:</span>
+                      <span class="detail-value">${booking.name}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Email:</span>
+                      <span class="detail-value">${booking.email}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Phone:</span>
+                      <span class="detail-value">${booking.phone}</span>
+                    </div>
+                    
+                    <h2 style="color: #C96846; margin-top: 30px;">Stay Details</h2>
+                    <div class="detail-row">
+                      <span class="detail-label">Check-in:</span>
+                      <span class="detail-value">${checkInDate}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Check-out:</span>
+                      <span class="detail-value">${checkOutDate}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Guests:</span>
+                      <span class="detail-value">${booking.adults} ${booking.adults === 1 ? 'Adult' : 'Adults'}, ${booking.children} ${booking.children === 1 ? 'Child' : 'Children'}</span>
+                    </div>
+                    
+                    ${booking.specialRequirements ? `
+                      <h2 style="color: #C96846; margin-top: 30px;">Special Requirements</h2>
+                      <p style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        ${booking.specialRequirements}
+                      </p>
+                    ` : ''}
+                    
+                    <h2 style="color: #C96846; margin-top: 30px;">Payment Summary</h2>
+                    <div class="detail-row">
+                      <span class="detail-label">Payment Status:</span>
+                      <span class="detail-value" style="color: #10B981; font-weight: bold;">PAID</span>
+                    </div>
+                    <div class="total">
+                      Total Paid: Ksh ${booking.totalAmount}
+                    </div>
+                  </div>
+                  
+                  <p style="margin-top: 30px;">
+                    Joseph will be in touch soon to confirm your arrival details and answer any questions you may have.
                   </p>
-                ` : ''}
-                
-                <h2 style="color: #C96846; margin-top: 30px;">Payment Summary</h2>
-                <div class="detail-row">
-                  <span class="detail-label">Payment ID:</span>
-                  <span class="detail-value">${paymentIntentId}</span>
+                  
+                  <p>
+                    For any immediate questions, please contact:<br>
+                    <strong>Phone:</strong> +254 714 389500<br>
+                    <strong>Location:</strong> Diani Coast, Kenya
+                  </p>
+                  
+                  <p>We look forward to welcoming you to Legacy Holiday Home Diani!</p>
                 </div>
-                <div class="detail-row">
-                  <span class="detail-label">Payment Status:</span>
-                  <span class="detail-value" style="color: #10B981; font-weight: bold;">PAID</span>
-                </div>
-                
-                <div class="total">
-                  Total Paid: Ksh ${booking.totalAmount}
+                <div class="footer">
+                  <p>This is your official booking confirmation and payment receipt.</p>
+                  <p>Legacy Holiday Home Diani - Your Luxury Escape Awaits</p>
                 </div>
               </div>
-              
-              <p style="margin-top: 30px;">
-                Joseph will be in touch soon to confirm your arrival details and answer any questions you may have.
-              </p>
-              
-              <p>
-                For any immediate questions, please contact:<br>
-                <strong>Phone:</strong> +254 714 389500<br>
-                <strong>Location:</strong> Diani Coast, Kenya
-              </p>
-              
-              <p>We look forward to welcoming you to Legacy Holiday Home Diani!</p>
-            </div>
-            <div class="footer">
-              <p>This is your official booking confirmation and payment receipt.</p>
-              <p>Legacy Holiday Home Diani - Your Luxury Escape Awaits</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `;
+            </body>
+            </html>
+          `;
 
-      try {
-        await transporter.sendMail({
-          from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
-          to: booking.email,
-          subject: `Booking Confirmed - Legacy Holiday Home Diani`,
-          html: receiptHtml,
-        });
-        console.log("Receipt email sent to guest successfully");
-      } catch (emailError: any) {
-        console.error("Failed to send receipt email to guest:", emailError.message);
-        // Log error but don't fail the confirmation
-      }
-
-      // Send payment confirmation to host
-      const hostNotificationHtml = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background-color: #10B981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
-            .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
-            .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
-            .detail-label { font-weight: bold; color: #666; }
-            .detail-value { color: #333; }
-            .total { font-size: 24px; color: #10B981; font-weight: bold; text-align: right; margin-top: 15px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>Payment Received</h1>
-              <p>Booking #${booking.id.substring(0, 8)}</p>
-            </div>
-            <div class="content">
-              <p>Hello Joseph,</p>
-              <p>Great news! Payment has been received for the booking from ${booking.name}.</p>
-              
-              <div class="booking-details">
-                <div class="detail-row">
-                  <span class="detail-label">Guest:</span>
-                  <span class="detail-value">${booking.name}</span>
+          // Host notification HTML
+          const hostNotificationHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background-color: #10B981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+                .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; border-radius: 0 0 8px 8px; }
+                .booking-details { background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+                .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+                .detail-label { font-weight: bold; color: #666; }
+                .detail-value { color: #333; }
+                .total { font-size: 24px; color: #10B981; font-weight: bold; text-align: right; margin-top: 15px; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+                <div class="header">
+                  <h1>Payment Received</h1>
+                  <p>Booking #${booking.id.substring(0, 8)}</p>
                 </div>
-                <div class="detail-row">
-                  <span class="detail-label">Check-in:</span>
-                  <span class="detail-value">${checkInDate}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Check-out:</span>
-                  <span class="detail-value">${checkOutDate}</span>
-                </div>
-                <div class="total">
-                  Amount Received: Ksh ${booking.totalAmount}
+                <div class="content">
+                  <p>Hello Joseph,</p>
+                  <p>Great news! Payment has been received for the booking from ${booking.name}.</p>
+                  <div class="booking-details">
+                    <div class="detail-row">
+                      <span class="detail-label">Guest:</span>
+                      <span class="detail-value">${booking.name}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Check-in:</span>
+                      <span class="detail-value">${checkInDate}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Check-out:</span>
+                      <span class="detail-value">${checkOutDate}</span>
+                    </div>
+                    <div class="total">
+                      Amount Received: Ksh ${booking.totalAmount}
+                    </div>
+                  </div>
+                  <p>The guest has been sent a confirmation email with their receipt. Please reach out to confirm their arrival arrangements.</p>
                 </div>
               </div>
-              
-              <p>The guest has been sent a confirmation email with their receipt. Please reach out to confirm their arrival arrangements.</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `;
+            </body>
+            </html>
+          `;
 
-      try {
-        await transporter.sendMail({
-          from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
-          to: "bettirosengugi@gmail.com",
-          subject: `Payment Received - ${booking.name}`,
-          html: hostNotificationHtml,
-        });
-        console.log("Payment confirmation email sent to host successfully");
-      } catch (emailError: any) {
-        console.error("Failed to send payment confirmation to host:", emailError.message);
+          // Send confirmation email to client
+          try {
+            await transporter.sendMail({
+              from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
+              to: booking.email,
+              subject: `Booking Confirmed - Legacy Holiday Home Diani`,
+              html: receiptHtml,
+            });
+            console.log("Receipt email sent to guest successfully");
+          } catch (emailError: any) {
+            console.error("Failed to send receipt email to guest:", emailError.message);
+          }
+          // Send payment confirmation to host
+          try {
+            await transporter.sendMail({
+              from: '"Legacy Holiday Home Diani" <noreply@replit.app>',
+              to: "larry.josephgithaka@gmail.com",
+              cc: "bettirosengugi@gmail.com",
+              subject: `Payment Received - ${booking.name}`,
+              html: hostNotificationHtml,
+            });
+            console.log("Payment confirmation email sent to host successfully");
+          } catch (emailError: any) {
+            console.error("Failed to send payment confirmation to host:", emailError.message);
+          }
+        }
+        return res.send("Payment successful! Your booking is confirmed.");
+      } else {
+        return res.send("Payment verification failed or booking not found.");
       }
-
-      res.json({
-        success: true,
-        message: "Payment confirmed and receipt sent",
-        bookingId: booking.id,
-      });
-    } catch (error: any) {
-      console.error("Payment confirmation error:", error);
-      res.status(500).json({
-        message: "Error confirming payment",
-        error: error.message
-      });
+    } catch (err: any) {
+      console.error("Paystack verification error:", err.response?.data || err.message);
+      return res.status(500).send("Error verifying payment.");
     }
   });
 

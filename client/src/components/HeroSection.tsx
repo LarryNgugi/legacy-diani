@@ -17,14 +17,14 @@ export default function HeroSection({
   onBookNow,
 }: HeroSectionProps) {
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
+    <section className="relative min-h-screen w-full flex items-center justify-center overflow-hidden">
       <div
-        className="absolute inset-0 bg-cover bg-center"
+        className="absolute inset-0 w-full h-full bg-cover bg-center object-cover"
         style={{ backgroundImage: `url(${backgroundImage})` }}
       />
       <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/40 to-black/20" />
       
-      <div className="relative z-10 text-center px-6 max-w-4xl mx-auto">
+      <div className="relative z-10 text-center w-full">
         <h1 
           className="font-serif text-5xl md:text-7xl font-semibold text-white mb-4"
           data-testid="text-villa-name"
