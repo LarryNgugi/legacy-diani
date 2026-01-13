@@ -794,7 +794,7 @@ app.use((req, res, next) => {
     res.status(status).json({ message });
     throw err;
   });
-  if (app.get("env") === "development") {
+  if (app.get("env") === "production") {
     await setupVite(app, server);
   } else {
     serveStatic(app);
