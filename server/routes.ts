@@ -3,22 +3,30 @@ dotenv.config();
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import nodemailer from "nodemailer";
+import SibApiV3Sdk from "sib-api-v3-sdk";
 import { insertBookingSchema } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
 import axios from "axios";
+import nodemailer from "nodemailer";
 
-
-// Initialize email transporter
+// Configure Nodemailer transporter
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT) || 465,
+  secure: true,
   auth: {
-    user: process.env.EMAIL_USER || "noreply@replit.app",
-    pass: process.env.EMAIL_PASS || "",
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
   },
 });
+
+// Initialize Brevo (Sendinblue) API
+const brevoClient = SibApiV3Sdk.ApiClient.instance;
+const apiKey = brevoClient.authentications['api-key'];
+apiKey.apiKey = process.env.BREVO_API_KEY;
+const transactionalEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+console.log("BREVO_API_KEY:", process.env.BREVO_API_KEY);
 
 export async function registerRoutes(app: Express): Promise<Server> {
   
@@ -295,36 +303,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
               <p>Legacy Holiday Home Diani</p>
             </div>
             <div class="content">
-              <p>Hello Joseph,</p>
+              <p>Hello Larry,</p>
               <p>You have received a new booking request for your villa!</p>
               
               <div class="booking-details">
                 <h2 style="color: #C96846; margin-top: 0;">Guest Information</h2>
                 <div class="detail-row">
                   <span class="detail-label">Name:</span>
-                  <span class="detail-value">${bookingData.name}</span>
+                  <span class="detail-value"> ${bookingData.name}</span>
                 </div>
                 <div class="detail-row">
                   <span class="detail-label">Email:</span>
-                  <span class="detail-value">${bookingData.email}</span>
+                  <span class="detail-value"> ${bookingData.email}</span>
                 </div>
                 <div class="detail-row">
                   <span class="detail-label">Phone:</span>
-                  <span class="detail-value">${bookingData.phone}</span>
+                  <span class="detail-value"> ${bookingData.phone}</span>
                 </div>
                 
                 <h2 style="color: #C96846; margin-top: 30px;">Stay Details</h2>
                 <div class="detail-row">
                   <span class="detail-label">Check-in:</span>
-                  <span class="detail-value">${checkInDate}</span>
+                  <span class="detail-value"> ${checkInDate}</span>
                 </div>
                 <div class="detail-row">
                   <span class="detail-label">Check-out:</span>
-                  <span class="detail-value">${checkOutDate}</span>
+                  <span class="detail-value"> ${checkOutDate}</span>
                 </div>
                 <div class="detail-row">
                   <span class="detail-label">Guests:</span>
-                  <span class="detail-value">${bookingData.adults} ${bookingData.adults === 1 ? 'Adult' : 'Adults'}, ${bookingData.children} ${bookingData.children === 1 ? 'Child' : 'Children'}</span>
+                  <span class="detail-value"> ${bookingData.adults} ${bookingData.adults === 1 ? 'Adult' : 'Adults'}, ${bookingData.children} ${bookingData.children === 1 ? 'Child' : 'Children'}</span>
                 </div>
                 
                 ${bookingData.specialRequirements ? `
@@ -353,16 +361,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         </html>
       `;
 
+
       try {
-        await transporter.sendMail({
-          from: '"Legacy Holiday Home Diani" <noreply@legacyholidayhome.co.ke>',
-          to: "bettirosengugi@gmail.com",
+        await transactionalEmailApi.sendTransacEmail({
+          sender: { name: "Legacy Holiday Home Diani", email: "info@legacyholidayhome.co.ke" },
+          to: [{ email: "larry.josephgithaka@gmail.com", name: "Larry" }],
+          cc: [{ email: "bettirosengugi@gmail.com", name: "Bettirose" }],
           subject: `New Booking Request from ${bookingData.name}`,
-          html: emailHtml,
+          htmlContent: emailHtml,
         });
-        console.log("Booking notification email sent successfully");
+        console.log("Booking notification email sent successfully via Brevo");
       } catch (emailError: any) {
-        console.error("Failed to send booking notification email:", emailError.message);
+        console.error("Failed to send booking notification email via Brevo:", emailError.message);
         // Don't fail the booking if email fails, but log the error
       }
 
@@ -392,9 +402,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const metadata = CallbackMetadata?.Item || [];
           const mpesaReceiptNumber = metadata.find((item: any) => item.Name === "MpesaReceiptNumber")?.Value;
           // Update booking payment status to paid
-          await storage.updateBookingPaymentStatusByCheckoutId(CheckoutRequestID, "paid");
           const booking = await storage.getBookingByCheckoutId(CheckoutRequestID);
           if (booking) {
+            await storage.updateBookingPaymentStatus(booking.id, "paid");
             // Prepare email HTML for receipt
             const checkInDate = new Date(booking.checkIn).toLocaleDateString('en-US', {
               weekday: 'long',

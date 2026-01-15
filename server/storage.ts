@@ -12,6 +12,7 @@ export interface IStorage {
   updateBookingPaymentId(bookingId: string, stripePaymentId: string): Promise<void>;
   updateBookingPaymentStatus(bookingId: string, status: string): Promise<void>;
   getBooking(id: string): Promise<Booking | undefined>;
+  getBookingByCheckoutId(checkoutId: string): Promise<Booking | undefined>;
 }
 
 export class MemStorage implements IStorage {
@@ -72,6 +73,12 @@ export class MemStorage implements IStorage {
 
   async getBooking(id: string): Promise<Booking | undefined> {
     return this.bookings.get(id);
+  }
+
+  async getBookingByCheckoutId(checkoutId: string): Promise<Booking | undefined> {
+    return Array.from(this.bookings.values()).find(
+      (booking) => booking.stripePaymentId === checkoutId
+    );
   }
 }
 
